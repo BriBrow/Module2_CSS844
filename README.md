@@ -6,4 +6,4 @@ Note: The R code starts with raw data:
 - `plotwise_values_new.csv`
 - `VNIR Band Name and range.xlsx`
 
-The file `CombinedPotatoData.csv` contains formatted data that can be used to run some code. It doesn't include the vnir data, as that is added in the `MakeLong` function.
+The file `CombinedPotatoData.csv` contains formatted data from `2020 Potato Late Blight Trial RAUDPC 20220224.xlsx` and `plotwise_values_new.csv`. It doesn't include the `VNIR Band Name and range.xlsx` data, as that is added later in the `MakeLong` function. 
