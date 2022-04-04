@@ -1,0 +1,643 @@
+---
+title: "Group 3: Potato data"
+author: "Abby Bryson, Brianna Brown, Paulo Izquierdo, Sikta Das Adhikari, Wendy Leuenberger"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+## Set up 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load packages 
+
+```{r, message = FALSE, warning = FALSE}
+# Load packages
+library(tidyverse)  # General data wrangling
+library(magrittr)   # Piping. %>% = "and then", %<>% saves over
+library(readxl)     # Read in excel spreadsheets (.xlsx)
+library(prospectr)  # For managing wavelengths, derivative
+```
+
+### ggplot settings
+
+```{r PlotSettings}
+tbw <- theme_bw(base_size = 18)
+th <- theme(panel.grid = element_blank())
+nol <- theme(legend.position = 'none')
+xl <- xlab('Wavelength (nm)')
+yl <- ylab('First derivative')
+```
+
+## Initial data management
+
+### Read in data
+
+```{r ReadData, message = FALSE}
+# Folder containing data, mapped on Wendy's computer. 
+# Would need to change for different people.
+
+# 
+setwd("/Users/paulo/Documents/PBGB/2022 spring/frontiers_css844")
+
+# Read in the potato data
+# RAUDPC = relative area under disease progress curve
+# First four rows are metadata; don't read them in 
+RAUDPC <- read_excel('2020 Potato Late Blight Trial RAUDPC 20220224.xlsx', skip = 4, na = '.')
+
+head(RAUDPC)
+
+# Read in hyperspectral data
+# Big file - 153 rows x 1394 columns. Won't need all columns
+spect <- read_csv('plotwise_values_new.csv')
+
+# NM 
+vnir <- read_excel('VNIR Band Name and range.xlsx',
+                   col_names = c('Layer', 'nm', 'Units'))
+
+## Combined data
+# We will create this document in the following code
+# Can use this code to read the formatted data into other R scripts
+# AllData <- read_csv('CombinedPotatoData.csv')
+```
+
+### Take a look at data
+
+```{r}
+# Disease data
+RAUDPC %>% head
+# Hyperspectral data
+spect %>% head
+# Layer names -> wavelengths (nm)
+vnir %>% head
+```
+
+Add a wavelength column to vnir that matches the other files. Make that column just have the number, not Layer_number
+
+```{r vnir}
+vnir %<>% 
+  mutate(Wavelength = Layer %>% str_remove('Layer_'))
+```
+
+
+### Which columns contain the same information
+
+Output not shown - a bunch of TRUE/FALSE to show if the columns line up. 
+
+```{r, results = 'hide'}
+colnames(spect)[1:20]
+RAUDPC[1:6]
+
+# Column names aren't the same
+colnames(RAUDPC) %in% colnames(spect) 
+
+# Which columns correspond
+# Rep is similar
+spect$Rep %in% RAUDPC$Rep
+
+# Rows have same data
+spect$Row %in% RAUDPC$ROW
+
+# Lines have mostly the same data
+spect$Line %in% RAUDPC$LINE
+RAUDPC$LINE %in% spect$Line
+
+# Blocks have mostly the same data
+spect$Block %in% RAUDPC$BLOCK
+
+# PlotNumber and PLOT seem like mostly the same data
+spect$PlotNumber %in% RAUDPC$PLOT
+RAUDPC$PLOT %in% spect$PlotNumber
+
+# Tier and range appear to be the same
+spect$Range %in% RAUDPC$TIER
+```
+
+### Prep data for join
+
+```{r, results = 'hide'}
+# Let's use Rep and Plot to join
+# Need to make sure the information lines up
+# Column names - join by PLOT
+spect %<>% rename(PLOT = PlotNumber)
+
+# Make the Line values line up
+spect$PLOT[spect$Line == 'AtlanticSpreader'] <- 'Spreader'
+
+# Make the Reps line up
+spect$Rep[spect$Line == 'AtlanticSpreader' &
+            spect$Row == 1] <- 1
+spect$Rep[spect$Line == 'AtlanticSpreader' &
+            spect$Row == 5] <- 2
+spect$Rep[spect$Line == 'AtlanticSpreader' &
+            spect$Row == 8] <- 3
+
+# Take a look (results not shown)
+spect %>% head
+RAUDPC %>% head
+```
+
+### Join data
+
+```{r join, message = FALSE}
+# Join
+AllData <- RAUDPC %>% 
+  full_join(spect)
+# Move rows so index columns are all together
+AllData %<>% 
+  relocate(c(fid, id, Row, Range, Block, Line, Pixels),
+           .after = Rep)
+
+# Make sure each plot has a unique identifier
+AllData$UniqueValue <- paste(AllData$PLOT, AllData$id, sep = '_')
+
+# Save as csv in case it's helpful
+# write_csv(AllData, file = 'CombinedPotatoData.csv')
+```
+
+## Data processing for analyses
+
+### Functions
+
+`MakeLong()`: Change data to long format
+
+`PlotSummary()`: Take mean of the replicate plots and organize for plotting
+
+`Derivative()`: Take the first derivative of the the wavelength data
+
+```{r}
+# Pull out values, change into long format
+
+MakeLong <- function(Data = data, Value = value){
+  
+  NewData <- Data %>% 
+    # Pull out the columns with early blight data (EB)
+    # Pull out the columns with a number and the provided value
+    # I.e. Value = _mean, pulls out 1_mean to 274_mean
+    select(UniqueValue, PLOT, LINE, Rep, id, Pixels,
+           starts_with('EB'), num_range(1:274, Value))
+  
+  # Change from wide to long format. This part only changes the 
+  # wavelengths to long. We may need to also change EB data
+  NewData %<>% 
+    pivot_longer(ends_with(Value), names_to = 'Wavelength',
+                 values_to = 'Value')
+  
+  # Remove the Value (i.e. _mean) from the wavelength column
+  # Change to numeric for use as numeric/plotting
+  NewData$Wavelength %<>% str_remove(Value)
+  
+  NewData %<>% 
+    left_join(vnir[,c('Wavelength', 'nm')])
+  
+  return(NewData)
+}
+
+
+PlotSummary <- function(Data = data, Colname = colname){
+  
+  # Pull out just the data wanted for plotting
+  # Might need to also pull out certain EB data
+  # Take the mean of whichever value (mean among replicates)
+  NewData <- Data %>% 
+    group_by(UniqueValue, PLOT, id, Wavelength, nm) %>% 
+    summarize(Name = mean(Value, na.rm = TRUE)) %>%
+    # Summarize isn't good at variable column names
+    # Change name below
+    rename_at('Name', ~ Colname) %>% 
+    arrange(Wavelength)
+  
+  return(NewData)
+  
+}
+
+
+Derivative <- function(Data = data, Colname = colname){
+  # Pull out just the wavelength numbers and values
+  # Needs to be a dataframe (not tibble)
+  NewData <- Data %>% 
+    ungroup %>% 
+    select(-PLOT, -id, -Wavelength) %>% 
+    arrange(nm) %>% 
+    pivot_wider(names_from = nm,
+                values_from = all_of(Colname)) %>% 
+    as.data.frame
+  
+  # Make the UniqueValues into rownames
+  # Only numeric values in data are allowed for derivative functions
+  rownames(NewData) <- NewData$UniqueValue
+  NewData$UniqueValue <- NULL
+  
+  # Take the first derivative
+  Deriv <- t(diff(t(NewData), differences = 1)) %>% 
+    as.data.frame()
+  
+  # Put the unique values back into the dataset
+  Deriv$UniqueValue <- rownames(Deriv)
+  
+  # Make into a long version for plotting/manipulation
+  DerivLong <- Deriv %>% 
+    pivot_longer(cols = -UniqueValue,
+                 names_to = 'nm',
+                 values_to = 'Derivative',
+                 names_transform = list(nm = as.numeric)) %>% 
+    arrange(nm)
+  
+  # Return the long form
+  return(DerivLong)
+}
+
+PrepPCA <- function(Data, Min_nm, Max_nm){
+  NewData <- Data %>% 
+    filter(nm > Min_nm & nm < Max_nm) %>% 
+    select(UniqueValue, Value, nm) %>% 
+    filter(!is.na(Value)) %>% 
+    pivot_wider(values_from = Value, names_from = nm)
+  return(NewData)
+}
+
+RunPCA <- function(Data, IDcol){
+  JustNumbers <- Data %>% 
+    select(-IDcol)
+  PCA <- JustNumbers %>% 
+    prcomp
+  PCA_Data <- data.frame(
+    PC1 = PCA$x[,1],
+    PC2 = PCA$x[,2],
+    label = Data[,IDcol]
+  )
+  return(PCA_Data)
+}
+```
+
+### Make datasets
+
+```{r Process, message = FALSE}
+# Mean values
+MeanLong <- MakeLong(AllData, '_mean')
+MeanPlot <- PlotSummary(Data = MeanLong, Colname = 'MeanValue')
+MeanDeriv <- Derivative(MeanPlot, Colname = 'MeanValue')
+
+# Median values
+MedianLong <- MakeLong(AllData, '_median')
+MedianPlot <- PlotSummary(Data = MedianLong,
+                          Colname = 'MedianValue')
+MedianDeriv <- Derivative(MedianPlot, Colname = 'MedianValue')
+```
+
+
+```{r NotFunction, include = FALSE}
+# Code to manipulate data not in a function
+# 
+# Mean <- AllData %>% 
+#   select(UniqueValue, PLOT, LINE, Rep, id, Pixels, 
+#          ends_with(c('_mean')))
+# Median <- AllData %>% 
+#   select(UniqueValue, PLOT, LINE, Rep, id, Pixels, 
+#          ends_with(c('_median')))
+# 
+# # Change into longer data format for plotting/data manipulation
+# Mean %<>% 
+#   pivot_longer(ends_with('_mean'), names_to = 'Wavelength',
+#                values_to = 'Value')
+# 
+# Median %<>% 
+#   pivot_longer(ends_with('_median'), names_to = 'Wavelength',
+#                values_to = 'Value')
+# 
+# # Remove the RGB value
+# Mean %<>% 
+#   filter(Wavelength != 'Red_mean',
+#          Wavelength != 'Green_mean',
+#          Wavelength != 'Blue_mean')
+# Median %<>% 
+#   filter(Wavelength != 'Red_median',
+#          Wavelength != 'Green_median',
+#          Wavelength != 'Blue_median')
+# 
+# 
+# # Remove _mean
+# Mean$Wavelength %<>% str_remove('_mean')
+# Median$Wavelength %<>% str_remove('_median')
+# 
+# # Average of sample
+# PlotData <- Mean %>% 
+#   group_by(UniqueValue, PLOT, id, Wavelength) %>% 
+#   summarize(MeanValue = mean(Value, na.rm = TRUE))
+# PlotDataMedian <- Median %>% 
+#   group_by(UniqueValue, PLOT, id, Wavelength) %>% 
+#   summarize(MedianValue = mean(Value, na.rm = TRUE))
+# 
+# PlotData$Wavelength %<>% as.numeric
+# PlotDataMedian$Wavelength %<>% as.numeric
+# 
+# PlotData %<>% arrange(Wavelength)
+# PlotDataMedian %<>% arrange(Wavelength)
+```
+
+### Initial plots of wavelengths
+
+Here's plots with 10 random and all of the plots. The 10 random plots will change every time the code is run.
+
+```{r, warning = FALSE, message = FALSE}
+Ten <- unique(AllData$UniqueValue) %>% sample(10)
+
+# Plot
+ggplot(MeanPlot %>% filter(UniqueValue %in% Ten),
+       aes(x = nm, y = MeanValue, 
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + xl + #nol +
+  labs(y = 'Mean value', 
+       title = 'Mean value of 10 random plots') 
+  
+
+ggplot(MedianPlot %>% filter(UniqueValue %in% Ten),
+       aes(x = nm, y = MedianValue, 
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + xl + 
+  labs(y = 'Median value',
+       title = 'Median value of 10 random plots')
+
+# Mean all plots
+ggplot(MeanPlot,
+       aes(x = nm, y = MeanValue, 
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + nol + xl +
+  labs(y = 'Mean value',
+       title = 'Mean value of all plots')
+
+
+# Median all plots
+ggplot(MedianPlot,
+       aes(x = nm, y = MedianValue, 
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + nol + xl +
+  labs(y = 'Median value',
+       title = 'Median value of all plots')
+
+```
+
+### Troubleshooting
+
+Plots with low wavelength values
+
+Problem solved with new data (3/27/2022), so this section isn't needed. Code is still in the document but isn't run.
+
+```{r, include = FALSE}
+# Just the ones with a low value at the 150-230
+Odd <- MeanPlot %>%
+  filter(Wavelength == '200' &
+           MeanValue <= 0.25)
+ggplot(MeanPlot %>% filter(PLOT %in% Odd$PLOT),
+       aes(x = nm, y = MeanValue,
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + xl + nol +
+  labs(y = 'Mean value',
+       title = 'Mean values - questionable plots')
+ggplot(MeanPlot %>% filter(PLOT %in% Odd$PLOT),
+       aes(x = nm, y = MeanValue,
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + xl + #nol +
+  labs(y = 'Mean value',
+       title = 'Mean values - questionable plots')
+
+OddMedian <- MedianPlot %>%
+  filter(Wavelength == '200' &
+           MedianValue <= 0.25)
+ggplot(MedianPlot %>% filter(PLOT %in% OddMedian$PLOT),
+       aes(x = nm, y = MedianValue,
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + nol +
+  labs(y = 'Median value',
+       title = 'Median values - questionable plots')
+ggplot(MedianPlot %>% filter(PLOT %in% OddMedian$PLOT),
+       aes(x = nm, y = MedianValue,
+                     color = UniqueValue)) +
+  geom_line() + th + tbw + #nol +
+  labs(y = 'Median value',
+       title = 'Median value - questionable plots')
+
+```
+
+
+### Derivatives
+
+
+```{r, include = FALSE}
+# Derivative code not in a loop
+# 
+# PlotData <- MeanPlot
+# Matrix <- PlotData %>%
+#   ungroup %>%
+#   select(-PLOT, -id, -Wavelength) %>% 
+#   arrange(nm)
+# 
+# Matrix %<>%
+#   pivot_wider(names_from = nm,
+#               values_from = MeanValue) %>%
+#   as.data.frame()
+# rownames(Matrix) <- Matrix$UniqueValue
+# Matrix$UniqueValue <- NULL
+# 
+# d1_rl <- t(diff(t(Matrix), differences = 1))
+# d1_rl %<>% as.data.frame()
+# d1_rl$UniqueValue <- rownames(d1_rl)
+# d1_rl_long <-
+#   d1_rl %>%
+#   pivot_longer(cols = -UniqueValue, names_to = 'nm',
+#                values_to = 'Derivative')
+# d1_rl_long$nm %<>% as.numeric
+# d1_rl_long %<>% arrange(nm)
+```
+
+```{r DerivPlots, warning = FALSE}
+# ggplot(d1_rl_long %>% filter(UniqueValue %in% Ten[1]),
+#        aes(x = nm, y = Derivative, color = UniqueValue)) +
+#   geom_line() + th + tbw + nol
+
+ggplot(MeanDeriv %>% filter(UniqueValue %in% Ten),
+       aes(x = nm, y = Derivative, color = UniqueValue)) +
+  geom_line() + th + tbw + nol + yl + xl +
+  ggtitle('First derivative of mean values at 10 random plots')
+
+ggplot(MeanDeriv,
+       aes(x = nm, y = Derivative, color = UniqueValue)) +
+  geom_line() + th + tbw + nol + yl + xl +
+  ggtitle('First derivative of mean values')
+
+
+```
+
+## PCA
+
+```{r}
+Test <- PrepPCA(MeanLong, 800, 900)
+TestRun <- RunPCA(Test, IDcol = 'UniqueValue')
+
+view(MeanLong)
+
+MeanForPCA <- MeanLong %>% 
+  filter(nm > 800 & nm < 900) %>% 
+  select(UniqueValue, PLOT, Value, nm) %>% 
+  filter(!is.na(Value)) %>% 
+  mutate(Spreader = ifelse(PLOT == 'Spreader', 
+                           'Spreader', 'Not Spreader')) %>% 
+  pivot_wider(values_from = Value, names_from = nm)
+MeanPCA <- MeanForPCA %>% 
+  select(-UniqueValue, -PLOT, -Spreader) %>% 
+  prcomp
+PCA_Mean <- data.frame(
+  PC1 = MeanPCA$x[,1],
+  PC2 = MeanPCA$x[,2],
+  label = MeanForPCA$UniqueValue,
+  classification = MeanForPCA$Spreader
+)
+
+ggplot(PCA_Mean, aes(x = PC1, y = PC2, 
+                     label = label, 
+                     col = classification)) +
+  geom_point() 
+  
+quantile(AllData$`EB%_dpi_0`, na.rm = TRUE)
+quantile(AllData$`EB%_dpi_23`, na.rm = TRUE)
+quantile(AllData$`EB%_dpi_26`, na.rm = TRUE)
+quantile(AllData$`EB%_dpi_30`, na.rm = TRUE)
+quantile(AllData$`EB%_dpi_37`, na.rm = TRUE)
+quantile(AllData$`EB%_dpi_43`, na.rm = TRUE)
+quantile(AllData$`EB%_dpi_47`, na.rm = TRUE)
+
+
+```
+
+##Libraries PLS
+
+```{r}
+library(pls)
+library(corrplot)
+library(RColorBrewer)
+```
+
+### PLS
+```{r}
+#MeanLong <- MakeLong(AllData, '_mean')
+dim(MeanLong)
+
+PLS_data <- spread(MeanLong[-24], nm, Value)
+dim(PLS_data)
+
+PLS_input <- PLS_data %>%
+  group_by(LINE) %>%
+  summarise(across(`EB%_dpi_0`:`1002.15`,mean)) %>%
+  drop_na()
+
+
+PLS_nm <- PLS_input[,c(1,19:292)] %>%
+          column_to_rownames(var = "LINE")
+PLS_pheno <- PLS_input[,c(1:18)] %>%
+          column_to_rownames(var = "LINE")
+
+PLS_nm[1:4,1:4]
+PLS_pheno[1:4,1:4]
+
+```
+
+
+PLS model
+
+
+```{r}
+
+PLS_nm <- as.matrix(PLS_nm)
+class(PLS_nm)
+
+PLS_model <- cbind(PLS_pheno,I(PLS_nm))
+
+str(PLS_model)
+dim(PLS_model)
+
+names(PLS_pheno)
+
+###
+
+cycles=100
+accuracy <- matrix(nrow = cycles, 
+                 ncol= 1)
+
+
+colnames(accuracy) <- "PLS_Model"
+
+pls_train$EB_AUDC_total
+
+for(i in 1:cycles) {
+    
+  train <- as.matrix(sample(1:29, 20)) 
+  test  <- setdiff(1:29, train)
+  
+  pls_train=PLS_model[train,]
+  pls_test=PLS_model[test,]
+    
+model <- plsr(`EB_AUDC_total` ~ msc(PLS_nm), 
+                  ncomp = 10,
+                  data = pls_train,  
+                  validation = "LOO")
+
+predi <- predplot(model,  ncomp = 10,
+                          newdata = pls_test,
+                          asp = 0, line = F)
+
+corre <- cor(predi, use = "complete")
+accuracy[i,] = corre[1,2]
+
+
+}
+
+apply(accuracy,2, mean)
+
+boxplot(accuracy, col="salmon", 
+        ylab="Accuracy")
+
+
+#Model summary
+summary(model)
+
+######Select components
+
+# Root Mean Squared Error of Prediction (RMSEP)
+plot(RMSEP(model), legendpos = "topright")
+
+# Prediction with 5 components 
+plot(model, ncomp = 5, asp = 1, line = TRUE)
+
+
+# Components 1-5 variance
+plot(model, plottype = "scores", comps = 1:5)
+
+
+# Components 1 and 2 wavelength
+plot(model, "loadings", comps = 1:2, 
+     legendpos = "topleft",
+     xlab = "Wavelength")
+abline(h = 0)
+
+```
+
+
+Correlation
+
+```{r}
+dim(PLS_pheno)
+
+M <- cor(PLS_pheno[,c(-1,-15)], use = "pairwise.complete.obs")
+
+corrplot(M, method = 'ellipse', order = 'AOE', type = 'upper')
+
+
+corrplot(M, method="number", type= 'upper')
+
+````
+
